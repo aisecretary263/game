@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mini-breakout</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at top, #1c2a49, #0a0f1e 60%);
+      color: #e7ecff;
+    }
+    .wrap {
+      width: min(92vw, 860px);
+      text-align: center;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(1.4rem, 2.2vw, 1.8rem);
+    }
+    p {
+      margin: 8px 0 14px;
+      opacity: 0.88;
+      font-size: 0.95rem;
+    }
+    canvas {
+      width: min(92vw, 820px);
+      height: auto;
+      border-radius: 10px;
+      border: 2px solid #2d406f;
+      background: linear-gradient(180deg, #0f1a35, #090f1f);
+      box-shadow: 0 14px 26px rgba(0, 0, 0, 0.35);
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>mini-breakout</h1>
+    <p>← → で移動 / Space で開始・一時停止 / R でリスタート</p>
+    <canvas id="game" width="820" height="560" aria-label="mini-breakout game"></canvas>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const WORLD = {
+      width: canvas.width,
+      height: canvas.height,
+      wallPadding: 22,
+      topHud: 56
+    };
+
+    const STAGES = [
+      {
+        name: "Stage 1",
+        rows: 5,
+        cols: 10,
+        marginX: 70,
+        marginTop: 96,
+        gap: 8,
+        brickW: 62,
+        brickH: 24,
+        hpPattern: [1, 1, 2, 1, 1]
+      },
+      {
+        name: "Stage 2",
+        rows: 6,
+        cols: 11,
+        marginX: 52,
+        marginTop: 90,
+        gap: 7,
+        brickW: 60,
+        brickH: 22,
+        hpPattern: [2, 1, 3, 1, 2, 1]
+      }
+    ];
+
+    const state = {
+      running: false,
+      gameOver: false,
+      gameClear: false,
+      lives: 3,
+      score: 0,
+      stageIndex: 0,
+      keys: { left: false, right: false },
+      message: "Spaceで開始"
+    };
+
+    const paddle = {
+      w: 124,
+      h: 16,
+      x: (WORLD.width - 124) / 2,
+      y: WORLD.height - 56,
+      speed: 470
+    };
+
+    const ball = {
+      r: 9,
+      x: WORLD.width / 2,
+      y: paddle.y - 10,
+      prevX: WORLD.width / 2,
+      prevY: paddle.y - 10,
+      vx: 220,
+      vy: -280,
+      speedCap: 620,
+      stuckToPaddle: true
+    };
+
+    let bricks = [];
+    let lastTs = 0;
+
+    function buildStage(index) {
+      const def = STAGES[index];
+      const list = [];
+      for (let row = 0; row < def.rows; row++) {
+        for (let col = 0; col < def.cols; col++) {
+          const hp = def.hpPattern[row % def.hpPattern.length];
+          list.push({
+            x: def.marginX + col * (def.brickW + def.gap),
+            y: def.marginTop + row * (def.brickH + def.gap),
+            w: def.brickW,
+            h: def.brickH,
+            hp,
+            maxHp: hp
+          });
+        }
+      }
+      return list;
+    }
+
+    function resetBall(onPaddle = true) {
+      ball.x = paddle.x + paddle.w / 2;
+      ball.y = paddle.y - ball.r - 2;
+      ball.prevX = ball.x;
+      ball.prevY = ball.y;
+      ball.vx = 220 * (Math.random() > 0.5 ? 1 : -1);
+      ball.vy = -280;
+      ball.stuckToPaddle = onPaddle;
+    }
+
+    function resetGame() {
+      state.running = false;
+      state.gameOver = false;
+      state.gameClear = false;
+      state.lives = 3;
+      state.score = 0;
+      state.stageIndex = 0;
+      state.message = "Spaceで開始";
+      paddle.x = (WORLD.width - paddle.w) / 2;
+      bricks = buildStage(state.stageIndex);
+      resetBall(true);
+    }
+
+    function launchBall() {
+      if (ball.stuckToPaddle) {
+        ball.stuckToPaddle = false;
+      }
+      state.running = true;
+      state.message = "";
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function circleRectCollision(c, r) {
+      const closestX = clamp(c.x, r.x, r.x + r.w);
+      const closestY = clamp(c.y, r.y, r.y + r.h);
+      const dx = c.x - closestX;
+      const dy = c.y - closestY;
+      const hit = dx * dx + dy * dy <= c.r * c.r;
+      if (!hit) return null;
+
+      const prevClosestX = clamp(c.prevX, r.x, r.x + r.w);
+      const prevClosestY = clamp(c.prevY, r.y, r.y + r.h);
+      const prevDx = c.prevX - prevClosestX;
+      const prevDy = c.prevY - prevClosestY;
+
+      const penX = c.r - Math.abs(dx);
+      const penY = c.r - Math.abs(dy);
+
+      let normalX = 0;
+      let normalY = 0;
+
+      if (Math.abs(prevDx) > Math.abs(prevDy)) {
+        normalX = Math.sign(dx || (c.x - (r.x + r.w / 2)));
+      } else if (Math.abs(prevDy) > Math.abs(prevDx)) {
+        normalY = Math.sign(dy || (c.y - (r.y + r.h / 2)));
+      } else if (penX < penY) {
+        normalX = Math.sign(dx || (c.x - (r.x + r.w / 2)));
+      } else {
+        normalY = Math.sign(dy || (c.y - (r.y + r.h / 2)));
+      }
+
+      if (!normalX && !normalY) {
+        normalY = -1;
+      }
+
+      return { normalX, normalY, penX, penY };
+    }
+
+    function reflectOnNormal(normalX, normalY) {
+      if (normalX) ball.vx = -ball.vx;
+      if (normalY) ball.vy = -ball.vy;
+
+      const speed = Math.hypot(ball.vx, ball.vy);
+      if (speed > ball.speedCap) {
+        const ratio = ball.speedCap / speed;
+        ball.vx *= ratio;
+        ball.vy *= ratio;
+      }
+    }
+
+    function update(dt) {
+      const move = (state.keys.right ? 1 : 0) - (state.keys.left ? 1 : 0);
+      paddle.x += move * paddle.speed * dt;
+      paddle.x = clamp(paddle.x, WORLD.wallPadding, WORLD.width - WORLD.wallPadding - paddle.w);
+
+      if (ball.stuckToPaddle) {
+        ball.x = paddle.x + paddle.w / 2;
+        ball.y = paddle.y - ball.r - 2;
+        ball.prevX = ball.x;
+        ball.prevY = ball.y;
+        return;
+      }
+      if (!state.running || state.gameOver || state.gameClear) return;
+
+      ball.prevX = ball.x;
+      ball.prevY = ball.y;
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+
+      if (ball.x - ball.r < WORLD.wallPadding) {
+        ball.x = WORLD.wallPadding + ball.r;
+        ball.vx = Math.abs(ball.vx);
+      } else if (ball.x + ball.r > WORLD.width - WORLD.wallPadding) {
+        ball.x = WORLD.width - WORLD.wallPadding - ball.r;
+        ball.vx = -Math.abs(ball.vx);
+      }
+      if (ball.y - ball.r < WORLD.topHud) {
+        ball.y = WORLD.topHud + ball.r;
+        ball.vy = Math.abs(ball.vy);
+      }
+
+      const paddleHit = circleRectCollision(ball, paddle);
+      if (paddleHit && ball.vy > 0) {
+        const hitPos = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2);
+        const angle = hitPos * 0.95;
+        const speed = Math.min(Math.hypot(ball.vx, ball.vy) + 22, ball.speedCap);
+        ball.vx = Math.sin(angle) * speed;
+        ball.vy = -Math.cos(angle) * speed;
+        ball.y = paddle.y - ball.r - 0.5;
+      }
+
+      for (const brick of bricks) {
+        if (brick.hp <= 0) continue;
+        const hit = circleRectCollision(ball, brick);
+        if (!hit) continue;
+
+        brick.hp -= 1;
+        state.score += 100;
+
+        if (hit.normalX) {
+          ball.x += hit.normalX * Math.max(hit.penX, 0.6);
+        }
+        if (hit.normalY) {
+          ball.y += hit.normalY * Math.max(hit.penY, 0.6);
+        }
+
+        reflectOnNormal(hit.normalX, hit.normalY);
+        break;
+      }
+
+      if (ball.y - ball.r > WORLD.height) {
+        state.lives -= 1;
+        if (state.lives <= 0) {
+          state.gameOver = true;
+          state.running = false;
+          state.message = "GAME OVER - Rで再開";
+        } else {
+          state.running = false;
+          state.message = "ミス！ Spaceで再開";
+          resetBall(true);
+        }
+      }
+
+      const remaining = bricks.some((b) => b.hp > 0);
+      if (!remaining) {
+        if (state.stageIndex < STAGES.length - 1) {
+          state.stageIndex += 1;
+          bricks = buildStage(state.stageIndex);
+          state.running = false;
+          state.message = `${STAGES[state.stageIndex].name} - Spaceで開始`;
+          resetBall(true);
+        } else {
+          state.gameClear = true;
+          state.running = false;
+          state.message = "CLEAR! Rでリスタート";
+        }
+      }
+    }
+
+    function brickColor(brick) {
+      if (brick.maxHp >= 3) return "#f55f7d";
+      if (brick.maxHp === 2) return "#f8a04e";
+      return "#58d0ff";
+    }
+
+    function drawHud() {
+      ctx.fillStyle = "#cfe0ff";
+      ctx.font = "bold 20px Segoe UI";
+      ctx.fillText(`Score: ${state.score}`, 28, 34);
+      ctx.fillText(`Lives: ${state.lives}`, 240, 34);
+      ctx.fillText(`Stage: ${state.stageIndex + 1}/${STAGES.length}`, 400, 34);
+    }
+
+    function drawBricks() {
+      for (const b of bricks) {
+        if (b.hp <= 0) continue;
+        ctx.fillStyle = brickColor(b);
+        ctx.globalAlpha = 0.55 + (b.hp / b.maxHp) * 0.45;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "rgba(255,255,255,0.2)";
+        ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
+      }
+    }
+
+    function drawPaddle() {
+      ctx.fillStyle = "#ecf5ff";
+      ctx.fillRect(paddle.x, paddle.y, paddle.w, paddle.h);
+      ctx.fillStyle = "#bfd6ff";
+      ctx.fillRect(paddle.x + 8, paddle.y + 3, paddle.w - 16, 5);
+    }
+
+    function drawBall() {
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+      ctx.fillStyle = "#fff8d8";
+      ctx.fill();
+      ctx.closePath();
+    }
+
+    function drawOverlay() {
+      if (!state.message) return;
+      ctx.fillStyle = "rgba(4,8,20,0.52)";
+      ctx.fillRect(0, 0, WORLD.width, WORLD.height);
+
+      ctx.fillStyle = state.gameClear ? "#9cf4a8" : state.gameOver ? "#ff9a9a" : "#f4f7ff";
+      ctx.font = "bold 36px Segoe UI";
+      const title = state.gameClear ? "CONGRATULATIONS" : state.gameOver ? "GAME OVER" : STAGES[state.stageIndex].name;
+      const tw = ctx.measureText(title).width;
+      ctx.fillText(title, (WORLD.width - tw) / 2, WORLD.height / 2 - 28);
+
+      ctx.font = "600 24px Segoe UI";
+      const msgW = ctx.measureText(state.message).width;
+      ctx.fillStyle = "#f2f6ff";
+      ctx.fillText(state.message, (WORLD.width - msgW) / 2, WORLD.height / 2 + 16);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, WORLD.width, WORLD.height);
+
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      for (let i = 1; i < 6; i++) {
+        const y = WORLD.topHud + ((WORLD.height - WORLD.topHud) / 6) * i;
+        ctx.beginPath();
+        ctx.moveTo(WORLD.wallPadding, y);
+        ctx.lineTo(WORLD.width - WORLD.wallPadding, y);
+        ctx.stroke();
+      }
+
+      drawHud();
+      drawBricks();
+      drawPaddle();
+      drawBall();
+      drawOverlay();
+    }
+
+    function loop(ts) {
+      if (!lastTs) lastTs = ts;
+      const dt = Math.min((ts - lastTs) / 1000, 1 / 30);
+      lastTs = ts;
+      update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "ArrowLeft") {
+        state.keys.left = true;
+        e.preventDefault();
+      } else if (e.code === "ArrowRight") {
+        state.keys.right = true;
+        e.preventDefault();
+      } else if (e.code === "Space") {
+        if (state.gameOver || state.gameClear) return;
+        if (!state.running && ball.stuckToPaddle) {
+          launchBall();
+        } else {
+          state.running = !state.running;
+          state.message = state.running ? "" : "一時停止中 - Spaceで再開";
+        }
+        e.preventDefault();
+      } else if (e.key.toLowerCase() === "r") {
+        resetGame();
+        e.preventDefault();
+      }
+    });
+
+    window.addEventListener("keyup", (e) => {
+      if (e.code === "ArrowLeft") state.keys.left = false;
+      if (e.code === "ArrowRight") state.keys.right = false;
+    });
+
+    resetGame();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
