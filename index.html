@@ -73,12 +73,37 @@
       return LEVEL_TEMPLATE.map(row => row.slice());
     }
 
+    function createPlayer(tx, ty) {
+      return {
+        tx, ty,
+        targetTx: tx,
+        targetTy: ty,
+        px: tx * TILE,
+        py: ty * TILE,
+        speed: 180,
+        alive: true,
+      };
+    }
+
+    function createEnemy(tx, ty) {
+      return {
+        tx, ty,
+        targetTx: tx,
+        targetTy: ty,
+        px: tx * TILE,
+        py: ty * TILE,
+        speed: 120,
+        alive: true,
+        dir: { x: 0, y: 0 },
+      };
+    }
+
     function resetRound(resetLives = false) {
       state.map = cloneMap();
       clearSpawnArea(1, 1);
       clearSpawnArea(11, 9);
-      state.player = { tx: 1, ty: 1, px: 1 * TILE, py: 1 * TILE, speed: 180, alive: true };
-      state.enemy = { tx: 11, ty: 9, px: 11 * TILE, py: 9 * TILE, speed: 120, alive: true };
+      state.player = createPlayer(1, 1);
+      state.enemy = createEnemy(11, 9);
       state.bombs = [];
       state.flames = [];
       state.inputDir = null;
@@ -105,24 +130,32 @@
       return state.bombs.some(b => b.tx === tx && b.ty === ty);
     }
 
-    function tryMove(entity, dir, dt) {
-      const amount = entity.speed * dt;
-      const targetX = entity.tx + dir.x;
-      const targetY = entity.ty + dir.y;
+    function isAtTarget(entity) {
+      return entity.tx === entity.targetTx && entity.ty === entity.targetTy;
+    }
 
-      if (!isBlocked(targetX, targetY)) {
-        entity.tx = targetX;
-        entity.ty = targetY;
+    function tryMove(entity, dir, dt) {
+      if (isAtTarget(entity) && dir) {
+        const nextX = entity.tx + dir.x;
+        const nextY = entity.ty + dir.y;
+        if (!isBlocked(nextX, nextY)) {
+          entity.targetTx = nextX;
+          entity.targetTy = nextY;
+        }
       }
 
-      const goalX = entity.tx * TILE;
-      const goalY = entity.ty * TILE;
+      const amount = entity.speed * dt;
+      const goalX = entity.targetTx * TILE;
+      const goalY = entity.targetTy * TILE;
       const dx = goalX - entity.px;
       const dy = goalY - entity.py;
       const dist = Math.hypot(dx, dy);
+
       if (dist <= amount || dist === 0) {
         entity.px = goalX;
         entity.py = goalY;
+        entity.tx = entity.targetTx;
+        entity.ty = entity.targetTy;
       } else {
         entity.px += (dx / dist) * amount;
         entity.py += (dy / dist) * amount;
@@ -141,8 +174,8 @@
     function placeBomb() {
       if (state.status !== 'PLAY') return;
       if (state.bombs.length >= 2) return;
-      const tx = Math.round(state.player.px / TILE);
-      const ty = Math.round(state.player.py / TILE);
+      const tx = state.player.tx;
+      const ty = state.player.ty;
       if (state.bombs.some(b => b.tx === tx && b.ty === ty)) return;
       state.bombs.push({ tx, ty, timer: 2.0 });
     }
@@ -192,13 +225,20 @@
       }
     }
 
+    function respawnPlayer() {
+      state.player = createPlayer(1, 1);
+      state.inputDir = null;
+      state.flames = [];
+      state.bombs = [];
+    }
+
     function loseLife() {
       state.lives -= 1;
       if (state.lives <= 0) {
         state.status = 'GAME OVER';
         state.player.alive = false;
       } else {
-        resetRound(false);
+        respawnPlayer();
       }
     }
 
