@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>bomb-grid-game</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #111827;
+      color: #e5e7eb;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    .wrap { text-align: center; }
+    canvas {
+      border: 2px solid #374151;
+      background: #0b1020;
+      image-rendering: pixelated;
+    }
+    .hint { margin-top: 8px; font-size: 14px; color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="624" height="560"></canvas>
+    <div class="hint">矢印キー: 移動 / スペース: 爆弾 / R: リスタート</div>
+  </div>
+
+  <script>
+    const TILE = 48;
+    const COLS = 13;
+    const ROWS = 11;
+    const UI_HEIGHT = 32;
+
+    const TILE_FLOOR = 0;
+    const TILE_WALL = 1;
+    const TILE_BLOCK = 2;
+
+    const LEVEL_TEMPLATE = [
+      [1,1,1,1,1,1,1,1,1,1,1,1,1],
+      [1,0,0,2,0,2,0,2,0,2,0,0,1],
+      [1,0,1,0,1,0,1,0,1,0,1,0,1],
+      [1,2,0,2,0,2,0,2,0,2,0,2,1],
+      [1,0,1,0,1,0,1,0,1,0,1,0,1],
+      [1,2,0,2,0,2,0,2,0,2,0,2,1],
+      [1,0,1,0,1,0,1,0,1,0,1,0,1],
+      [1,2,0,2,0,2,0,2,0,2,0,2,1],
+      [1,0,1,0,1,0,1,0,1,0,1,0,1],
+      [1,0,0,2,0,2,0,2,0,2,0,0,1],
+      [1,1,1,1,1,1,1,1,1,1,1,1,1],
+    ];
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const state = {
+      map: [],
+      player: null,
+      enemy: null,
+      bombs: [],
+      flames: [],
+      inputDir: null,
+      status: 'PLAY',
+      lives: 3,
+      lastTime: 0,
+      enemyMoveTimer: 0,
+    };
+
+    function cloneMap() {
+      return LEVEL_TEMPLATE.map(row => row.slice());
+    }
+
+    function resetRound(resetLives = false) {
+      state.map = cloneMap();
+      clearSpawnArea(1, 1);
+      clearSpawnArea(11, 9);
+      state.player = { tx: 1, ty: 1, px: 1 * TILE, py: 1 * TILE, speed: 180, alive: true };
+      state.enemy = { tx: 11, ty: 9, px: 11 * TILE, py: 9 * TILE, speed: 120, alive: true };
+      state.bombs = [];
+      state.flames = [];
+      state.inputDir = null;
+      state.status = 'PLAY';
+      state.enemyMoveTimer = 0;
+      if (resetLives) state.lives = 3;
+    }
+
+    function clearSpawnArea(x, y) {
+      const around = [[0,0],[1,0],[-1,0],[0,1],[0,-1]];
+      for (const [dx, dy] of around) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx > 0 && nx < COLS - 1 && ny > 0 && ny < ROWS - 1 && state.map[ny][nx] === TILE_BLOCK) {
+          state.map[ny][nx] = TILE_FLOOR;
+        }
+      }
+    }
+
+    function isBlocked(tx, ty) {
+      if (tx < 0 || tx >= COLS || ty < 0 || ty >= ROWS) return true;
+      const t = state.map[ty][tx];
+      if (t === TILE_WALL || t === TILE_BLOCK) return true;
+      return state.bombs.some(b => b.tx === tx && b.ty === ty);
+    }
+
+    function tryMove(entity, dir, dt) {
+      const amount = entity.speed * dt;
+      const targetX = entity.tx + dir.x;
+      const targetY = entity.ty + dir.y;
+
+      if (!isBlocked(targetX, targetY)) {
+        entity.tx = targetX;
+        entity.ty = targetY;
+      }
+
+      const goalX = entity.tx * TILE;
+      const goalY = entity.ty * TILE;
+      const dx = goalX - entity.px;
+      const dy = goalY - entity.py;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= amount || dist === 0) {
+        entity.px = goalX;
+        entity.py = goalY;
+      } else {
+        entity.px += (dx / dist) * amount;
+        entity.py += (dy / dist) * amount;
+      }
+    }
+
+    function setInput(e) {
+      if (e.key === 'ArrowUp') state.inputDir = { x: 0, y: -1 };
+      else if (e.key === 'ArrowDown') state.inputDir = { x: 0, y: 1 };
+      else if (e.key === 'ArrowLeft') state.inputDir = { x: -1, y: 0 };
+      else if (e.key === 'ArrowRight') state.inputDir = { x: 1, y: 0 };
+      else if (e.key === ' ') placeBomb();
+      else if (e.key.toLowerCase() === 'r') resetRound(true);
+    }
+
+    function placeBomb() {
+      if (state.status !== 'PLAY') return;
+      if (state.bombs.length >= 2) return;
+      const tx = Math.round(state.player.px / TILE);
+      const ty = Math.round(state.player.py / TILE);
+      if (state.bombs.some(b => b.tx === tx && b.ty === ty)) return;
+      state.bombs.push({ tx, ty, timer: 2.0 });
+    }
+
+    function explodeBomb(bomb) {
+      const cells = [{ tx: bomb.tx, ty: bomb.ty }];
+      const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+
+      for (const [dx, dy] of dirs) {
+        for (let i = 1; i <= 2; i++) {
+          const tx = bomb.tx + dx * i;
+          const ty = bomb.ty + dy * i;
+          const tile = state.map[ty]?.[tx];
+          if (tile === TILE_WALL) break;
+          cells.push({ tx, ty });
+          if (tile === TILE_BLOCK) {
+            state.map[ty][tx] = TILE_FLOOR;
+            break;
+          }
+        }
+      }
+
+      state.flames.push({ cells, timer: 0.3 });
+    }
+
+    function hitCheck(tx, ty, entity) {
+      return entity.alive && Math.round(entity.px / TILE) === tx && Math.round(entity.py / TILE) === ty;
+    }
+
+    function applyDamage() {
+      for (const flame of state.flames) {
+        for (const c of flame.cells) {
+          if (hitCheck(c.tx, c.ty, state.player) && state.status === 'PLAY') {
+            loseLife();
+            return;
+          }
+          if (hitCheck(c.tx, c.ty, state.enemy)) {
+            state.enemy.alive = false;
+            if (state.status === 'PLAY') state.status = 'CLEAR';
+          }
+        }
+      }
+
+      if (state.enemy.alive && state.status === 'PLAY') {
+        const d = Math.hypot(state.player.px - state.enemy.px, state.player.py - state.enemy.py);
+        if (d < TILE * 0.4) loseLife();
+      }
+    }
+
+    function loseLife() {
+      state.lives -= 1;
+      if (state.lives <= 0) {
+        state.status = 'GAME OVER';
+        state.player.alive = false;
+      } else {
+        resetRound(false);
+      }
+    }
+
+    function updateEnemy(dt) {
+      if (!state.enemy.alive || state.status !== 'PLAY') return;
+      state.enemyMoveTimer -= dt;
+      if (state.enemyMoveTimer <= 0) {
+        const options = [
+          {x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}
+        ].filter(d => !isBlocked(state.enemy.tx + d.x, state.enemy.ty + d.y));
+        state.enemy.dir = options[Math.floor(Math.random() * options.length)] || {x:0,y:0};
+        state.enemyMoveTimer = 0.35;
+      }
+      if (state.enemy.dir) tryMove(state.enemy, state.enemy.dir, dt);
+    }
+
+    function update(dt) {
+      if (state.status === 'PLAY' && state.inputDir) {
+        tryMove(state.player, state.inputDir, dt);
+      }
+
+      for (let i = state.bombs.length - 1; i >= 0; i--) {
+        const b = state.bombs[i];
+        b.timer -= dt;
+        if (b.timer <= 0) {
+          explodeBomb(b);
+          state.bombs.splice(i, 1);
+        }
+      }
+
+      for (let i = state.flames.length - 1; i >= 0; i--) {
+        state.flames[i].timer -= dt;
+        if (state.flames[i].timer <= 0) state.flames.splice(i, 1);
+      }
+
+      updateEnemy(dt);
+      applyDamage();
+    }
+
+    function drawMap() {
+      for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+          const tile = state.map[y][x];
+          const px = x * TILE;
+          const py = y * TILE + UI_HEIGHT;
+
+          if (tile === TILE_FLOOR) {
+            ctx.fillStyle = '#1f2937';
+            ctx.fillRect(px, py, TILE, TILE);
+          } else if (tile === TILE_WALL) {
+            ctx.fillStyle = '#4b5563';
+            ctx.fillRect(px, py, TILE, TILE);
+            ctx.fillStyle = '#374151';
+            ctx.fillRect(px + 8, py + 8, TILE - 16, TILE - 16);
+          } else {
+            ctx.fillStyle = '#92400e';
+            ctx.fillRect(px, py, TILE, TILE);
+            ctx.fillStyle = '#b45309';
+            ctx.fillRect(px + 6, py + 6, TILE - 12, TILE - 12);
+          }
+
+          ctx.strokeStyle = '#111827';
+          ctx.strokeRect(px, py, TILE, TILE);
+        }
+      }
+    }
+
+    function drawBombsAndFlames() {
+      for (const b of state.bombs) {
+        const cx = b.tx * TILE + TILE / 2;
+        const cy = b.ty * TILE + UI_HEIGHT + TILE / 2;
+        ctx.fillStyle = '#111827';
+        ctx.beginPath();
+        ctx.arc(cx, cy, TILE * 0.28, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(cx - 3, cy - TILE * 0.38, 6, 10);
+      }
+
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.8)';
+      for (const flame of state.flames) {
+        for (const c of flame.cells) {
+          ctx.fillRect(c.tx * TILE + 8, c.ty * TILE + UI_HEIGHT + 8, TILE - 16, TILE - 16);
+        }
+      }
+    }
+
+    function drawActors() {
+      if (state.enemy.alive) {
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.arc(state.enemy.px + TILE / 2, state.enemy.py + UI_HEIGHT + TILE / 2, TILE * 0.28, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (state.player.alive) {
+        ctx.fillStyle = '#22d3ee';
+        ctx.beginPath();
+        ctx.arc(state.player.px + TILE / 2, state.player.py + UI_HEIGHT + TILE / 2, TILE * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawUI() {
+      ctx.fillStyle = '#030712';
+      ctx.fillRect(0, 0, canvas.width, UI_HEIGHT);
+      ctx.fillStyle = '#e5e7eb';
+      ctx.font = '16px sans-serif';
+      ctx.fillText(`LIFE: ${state.lives}`, 12, 22);
+      ctx.fillText(`BOMBS: ${state.bombs.length}/2`, 140, 22);
+      ctx.fillText(`STATE: ${state.status}`, 290, 22);
+
+      if (state.status !== 'PLAY') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fillRect(0, UI_HEIGHT, canvas.width, canvas.height - UI_HEIGHT);
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = 'bold 44px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(state.status, canvas.width / 2, canvas.height / 2);
+        ctx.font = '16px sans-serif';
+        ctx.fillText('R キーでリスタート', canvas.width / 2, canvas.height / 2 + 34);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawMap();
+      drawBombsAndFlames();
+      drawActors();
+      drawUI();
+    }
+
+    function loop(ts) {
+      const dt = Math.min((ts - state.lastTime) / 1000, 0.05);
+      state.lastTime = ts;
+      update(dt);
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+      setInput(e);
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
+        state.inputDir = null;
+      }
+    });
+
+    resetRound(true);
+    requestAnimationFrame((ts) => {
+      state.lastTime = ts;
+      loop(ts);
+    });
+  </script>
+</body>
+</html>
